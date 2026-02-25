@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>影视管理与自动化控制台</title>
+    <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/element-plus/2.3.8/index.css" />
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.3.4/vue.global.prod.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/element-plus/2.3.8/index.full.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.4.0/axios.min.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/element-plus-icons-vue/2.1.0/index.iife.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+    <div id="app">
+        <el-container style="height: 100vh;">
+            <el-header style="background-color: #1f2d3d; color: white; line-height: 60px; font-size: 20px; font-weight: bold;">
+                🎬 影视订阅与全自动控制中心
+            </el-header>
+            
+            <el-container>
+                <el-aside width="220px">
+                    <el-menu 
+                        background-color="#304156" 
+                        text-color="#bfcbd9" 
+                        active-text-color="#409EFF" 
+                        :default-active="activeMenu" 
+                        @select="handleMenuSelect">
+                        <el-sub-menu index="m1">
+                            <template #title><el-icon><HotWater /></el-icon>热门推荐</template>
+                            <el-menu-item index="hot">今日热门</el-menu-item>
+                            <el-menu-item index="movie">电影库</el-menu-item>
+                            <el-menu-item index="tv">剧集库</el-menu-item>
+                            <el-menu-item index="discover">全网搜索</el-menu-item>
+                        </el-sub-menu>
+                        <el-menu-item index="subscriptions"><el-icon><List /></el-icon>我的订阅</el-menu-item>
+                        <el-sub-menu index="m2">
+                            <template #title><el-icon><Setting /></el-icon>系统设置</template>
+                            <el-menu-item index="settings">基本配置</el-menu-item>
+                            <el-menu-item index="settings_cron">定时与CMS</el-menu-item>
+                            <el-menu-item index="settings_115">115网盘登录</el-menu-item>
+                            <el-menu-item index="logs">系统日志</el-menu-item>
+                        </el-sub-menu>
+                    </el-menu>
+                </el-aside>
+
+                <el-main v-loading.fullscreen.lock="syncingData">
+                    <div v-if="['hot','movie','tv','discover'].includes(activeMenu)">
+                        <h2 style="margin-top:0">{{ getMenuTitle(activeMenu) }}</h2>
+                        <div v-if="activeMenu==='discover'" style="margin-bottom:20px; display:flex; gap:10px; max-width:500px;">
+                            <el-input v-model="sq" placeholder="搜全网资源..." @keyup.enter="searchTMDB"></el-input>
+                            <el-button type="primary" @click="searchTMDB">搜索</el-button>
+                        </div>
+                        <div class="media-grid">
+                            <el-card v-for="i in (activeMenu==='discover'?sr:lm)" :key="i.tmdb_id||i.id" :body-style="{padding:'10px'}" shadow="hover">
+                                <img :src="i.poster_path?config.image_domain+'/t/p/w500'+i.poster_path:'https://via.placeholder.com/200x300?text=No+Poster'" class="poster">
+                                <div class="media-info">
+                                    <div class="title">{{i.title||i.name}}</div>
+                                    <div class="action-group">
+                                        <el-button type="primary" size="small" :disabled="i.is_subscribed" @click="subscribe(i, activeMenu!=='discover')">{{i.is_subscribed?'已订':'订阅'}}</el-button>
+                                        <el-button type="success" size="small" @click="openPanSou(i.title||i.name)">盘搜</el-button>
+                                    </div>
+                                </div>
+                            </el-card>
+                        </div>
+                    </div>
+
+                    <div v-if="activeMenu==='subscriptions'">
+                        <h2>📚 订阅清单 (等待自动搜刮推送)</h2>
+                        <el-table :data="subscriptions" style="width: 100%">
+                            <el-table-column prop="title" label="作品名称"></el-table-column>
+                            <el-table-column prop="media_type" label="类型" width="100"></el-table-column>
+                            <el-table-column prop="status" label="状态" width="120">
+                                <template #default="s"><el-tag type="warning">{{s.row.status==='pending'?'待处理':'处理中'}}</el-tag></template>
+                            </el-table-column>
+                            <el-table-column label="操作" width="150">
+                                <template #default="s"><el-button type="danger" size="small" @click="unsubscribeMedia(s.row)">取消订阅</el-button></template>
+                            </el-table-column>
+                        </el-table>
+                    </div>
+
+                    <div v-if="activeMenu==='settings' || activeMenu==='settings_cron'" class="settings-wrapper">
+                        <el-card shadow="never">
+                            <el-form label-width="130px">
+                                <template v-if="activeMenu==='settings'">
+                                    <el-divider content-position="left">TMDB 与 盘搜配置</el-divider>
+                                    <el-form-item label="TMDB API Key"><el-input v-model="config.api_key" placeholder="填写 5ac6800..."></el-input></el-form-item>
+                                    <el-form-item label="盘搜 API 地址"><el-input v-model="config.pansou_domain" placeholder="http://192.168..."></el-input></el-form-item>
+                                </template>
+                                <template v-else>
+                                    <el-divider content-position="left">任务定时与 CMS 对接</el-divider>
+                                    <el-form-item label="Cron 表达式"><el-input v-model="config.cron_expression"></el-input></el-form-item>
+                                    <el-form-item label="CMS API 地址"><el-input v-model="config.cms_api_url"></el-input></el-form-item>
+                                    <el-form-item label="CMS Token"><el-input v-model="config.cms_api_token" type="password" show-password></el-input></el-form-item>
+                                    <el-form-item>
+                                        <el-button type="warning" @click="runTaskManual">🚀 立即运行一次自动检索推送</el-button>
+                                    </el-form-item>
+                                </template>
+                                <el-form-item>
+                                    <el-button type="primary" @click="saveConfig">保存当前配置</el-button>
+                                </el-form-item>
+                            </el-form>
+                        </el-card>
+                    </div>
+
+                    <div v-if="activeMenu==='settings_115'" class="settings-wrapper">
+                        <h2>☁️ 115网盘扫码登录</h2>
+                        <el-card class="mb-20">
+                            <template #header>当前 Cookie (自动同步数据库)</template>
+                            <el-input v-model="config.cookie_115" type="textarea" :rows="3" disabled placeholder="扫码后自动显示..."></el-input>
+                        </el-card>
+                        <div class="qr-container">
+                            <el-button type="primary" @click="generate115QrCode" :loading="qrLoading">生成登录二维码</el-button>
+                            <div v-if="qUrl" style="margin-top:20px; text-align:center;">
+                                <img :src="qUrl" class="qr-img" style="border:10px solid #fff; box-shadow:0 0 10px rgba(0,0,0,0.1)">
+                                <h3 :style="{color: qSt.includes('✅')?'#67C23A':'#409EFF'}">{{qSt}}</h3>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div v-if="activeMenu==='logs'">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <h2>📋 系统运行日志</h2>
+                            <el-button type="primary" plain circle @click="loadLogs">↻</el-button>
+                        </div>
+                        <el-table :data="systemLogs" height="calc(100vh - 180px)" stripe border>
+                            <el-table-column prop="created_at" label="时间" width="180"></el-table-column>
+                            <el-table-column prop="level" label="级别" width="100">
+                                <template #default="s">
+                                    <el-tag :type="s.row.level==='SUCCESS'?'success':(s.row.level==='ERROR'?'danger':'info')">{{s.row.level}}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="message" label="日志详情"></el-table-column>
+                        </el-table>
+                    </div>
+                </el-main>
+            </el-container>
+        </el-container>
+
+        <el-dialog v-model="pv" :title="'🔍 盘搜结果: '+curKw" width="80%">
+            <el-tabs v-if="Object.keys(pr).length">
+                <el-tab-pane v-for="(links, type) in pr" :key="type" :label="type.toUpperCase()+' ('+links.length+')'">
+                    <el-table :data="links" height="400">
+                        <el-table-column prop="note" label="资源说明" show-overflow-tooltip></el-table-column>
+                        <el-table-column label="链接">
+                            <template #default="s"><el-link type="primary" :href="s.row.url" target="_blank">{{s.row.url}}</el-link></template>
+                        </el-table-column>
+                        <el-table-column prop="password" label="码" width="80"></el-table-column>
+                    </el-table>
+                </el-tab-pane>
+            </el-tabs>
+            <el-empty v-else description="未搜索到资源"></el-empty>
+        </el-dialog>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>
