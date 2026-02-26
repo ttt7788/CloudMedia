@@ -6,7 +6,6 @@ class ConfigModel(BaseModel):
     image_domain: str
     api_key: str
     pansou_domain: str
-    # 新增字段
     cron_expression: str
     cms_api_url: str
     cms_api_token: str
@@ -17,9 +16,12 @@ class SubscribeModel(BaseModel):
     title: str
     overview: Optional[str] = ""
     poster_path: Optional[str] = ""
+    force: Optional[bool] = False  # 新增：强制订阅标识
 
 class QrcodeStatusModel(BaseModel):
-    uid: str; time: int; sign: str
+    uid: str
+    time: int
+    sign: str
 
 class QrcodeLoginModel(BaseModel):
     uid: str
