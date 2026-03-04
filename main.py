@@ -43,8 +43,8 @@ async def lifespan(app: FastAPI):
     task.cancel()
     add_log("WARNING", "🛑 系统收到关闭信号，后台守护进程与服务器已安全终止。")
 
-# 【名称修改】API 接口文档标题
-app = FastAPI(title="CineLink 云幕智链 - 核心 API", lifespan=lifespan)
+# 【核心修改】API 接口文档增加版本号 v2.0.1
+app = FastAPI(title="CineLink 云幕智链 - 核心 API v2.0.1", lifespan=lifespan)
 
 async def background_task_loop():
     add_log("INFO", "⏰ 后台调度守护进程已启动，系统将【每天执行一次】自动搜刮与转存。")
@@ -71,9 +71,9 @@ async def root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 if __name__ == "__main__":
-    # 【名称修改】终端启动横幅
+    # 【核心修改】终端启动横幅增加版本号 v2.0.1
     print("=======================================================")
-    print("🎬 CineLink (云幕智链) 控制台中枢启动中...")
+    print("🎬 CineLink (云幕智链) 控制台中枢启动中... [版本: v2.0.1]")
     print("👉 请在浏览器访问: http://127.0.0.1:8000")
     print("=======================================================")
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
