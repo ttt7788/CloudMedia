@@ -18,7 +18,6 @@ const app = createApp({
         const drivePaths = ref([]); 
         const currentDriveType = ref(''); 
         
-        // 【核心修改】新增 auto_subscribe_drive 数据项，默认值 115
         const config = ref({ api_domain: '', image_domain: '', api_key: '', pansou_domain: '', cookie_115: '', cookie_quark: '', token_aliyun: '', quark_save_dir: '0', aliyun_save_dir: 'root', cron_expression: '', cms_api_url: '', cms_api_token: '', auto_subscribe_new: '0', auto_subscribe_drive: '115' });
         
         const pv = ref(false), pr = ref({}), curKw = ref('');
@@ -105,6 +104,12 @@ const app = createApp({
                 stopLogPoll();
             }
 
+            // 清理二维码定时器
+            if (pTimer.value) {
+                clearInterval(pTimer.value);
+                pTimer.value = null;
+            }
+
             if(['hot', 'movie', 'tv'].includes(i)) { currentPage.value = 1; loadLocalMedia(i, 1); }
             else if(i === 'subscriptions') loadSubscriptions(); 
             else if(i === 'records') loadRecords(); 
@@ -142,7 +147,59 @@ const app = createApp({
             } catch (e) {} 
         };
         
-        const generate115QrCode = async () => {};
+        // 【核心修复】115 网盘扫码状态轮询机制
+        const poll115Status = async () => {
+            if (!qTok.value) return;
+            try {
+                const r = await axios.post(`${API_BASE}/115/status`, { uid: qTok.value.uid, time: qTok.value.time, sign: qTok.value.sign });
+                const d = r.data.data || {};
+                const st = d.status;
+                
+                if (st === 0) {
+                    qSt.value = '请使用 115 App 扫描上方二维码';
+                } else if (st === 1) {
+                    qSt.value = '已扫码，请在手机上点击确认登录';
+                } else if (st === 2) {
+                    qSt.value = '✅ 登录成功，正在提取 Cookie...';
+                    clearInterval(pTimer.value);
+                    pTimer.value = null;
+                    // 请求后端用 uid 换取完整 Cookie 并保存
+                    await axios.post(`${API_BASE}/115/login`, { uid: qTok.value.uid });
+                    ElMessage.success('115 网盘授权成功！');
+                    loadConfig(); // 刷新页面数据，让 Cookie 框回显
+                    qUrl.value = ''; // 隐藏二维码
+                } else if (st === -1 || st === -2) {
+                    qSt.value = '❌ 二维码已过期或失效，请重新生成';
+                    clearInterval(pTimer.value);
+                    pTimer.value = null;
+                }
+            } catch (e) {
+                // 如果是偶尔的网络抖动，不打断轮询
+            }
+        };
+
+        // 【核心修复】115 网盘获取二维码逻辑
+        const generate115QrCode = async () => {
+            if (pTimer.value) clearInterval(pTimer.value);
+            qrLoading.value = true;
+            qUrl.value = '';
+            qSt.value = '正在向 115 请求二维码...';
+            try {
+                const r = await axios.get(`${API_BASE}/115/qrcode`);
+                const d = r.data.data;
+                qTok.value = d;
+                // 115 的登录二维码固定拼接格式
+                qUrl.value = d.qrcode || `https://qrcodeapi.115.com/api/1.0/web/1.0/login/qrcode?uid=${d.uid}`;
+                qSt.value = '请使用 115 App 扫码';
+                // 每 2 秒查一次扫码状态
+                pTimer.value = setInterval(poll115Status, 2000);
+            } catch (e) {
+                qSt.value = '二维码请求失败';
+                ElMessage.error('无法获取 115 二维码: ' + (e.response?.data?.detail || e.message));
+            } finally {
+                qrLoading.value = false;
+            }
+        };
 
         onMounted(async () => { 
             await loadConfig(); 
