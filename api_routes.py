@@ -41,30 +41,39 @@ async def sync_daily_data():
     add_log("INFO", "已检测到 TMDB API Key，后台马上开始采集数据...")
     from scheduler import sync_tmdb_data
     import asyncio
-    asyncio.create_task(sync_tmdb_data(force=True))
+    asyncio.create_task(sync_tmdb_data(force=True, mode="all"))
     
-    return {"status": "success", "message": "全量数据入库操作已马上启动，请留意系统运行日志！"}
+    return {"status": "success", "message": "数据入库操作已马上启动，请留意系统运行日志！"}
 
-# 【核心优化】：将同步方法变为 async，加入“第一次访问空白时，立刻拦截并采集前10页”的逻辑
 @router.get("/api/local_media")
 async def get_local_media(type: str = 'hot', page: int = 1, size: int = 30):
     conn = get_db()
     today_str = datetime.date.today().isoformat()
     
-    # 【优化项】检查今日热门数据是否为空
-    c_q_today = "SELECT COUNT(*) FROM media_items WHERE add_date = ?"
-    today_count = conn.execute(c_q_today, (today_str,)).fetchone()[0]
-    
-    # 如果今天是空白的（例如您第一次访问，定时任务还没跑）
-    if today_count == 0:
-        conn.close() # 先释放连接防卡死
-        config = get_sys_config()
-        if config.get('api_key'):
-            from scheduler import sync_tmdb_data
-            add_log("INFO", "🚀 首次访问触发：今日热门数据为空，立刻开启极速同步 (前10页)...")
-            # 阻塞等待同步完成（10页通常只要2~3秒，体验极佳）
-            await sync_tmdb_data(force=True, max_pages=10)
-        conn = get_db() # 同步完重新获取连接
+    if type == 'hot':
+        c_q_today = "SELECT COUNT(*) FROM media_items WHERE add_date = ?"
+        today_count = conn.execute(c_q_today, (today_str,)).fetchone()[0]
+        
+        if today_count == 0:
+            conn.close() 
+            config = get_sys_config()
+            if config.get('api_key'):
+                from scheduler import sync_tmdb_data
+                add_log("INFO", "🚀 首次访问触发：今日热门数据为空，立刻极速同步 (前10页)...")
+                await sync_tmdb_data(force=True, mode="trending")
+            conn = get_db() 
+            
+    elif type in ['movie', 'tv']:
+        total_count = conn.execute("SELECT COUNT(*) FROM media_items").fetchone()[0]
+        if total_count < 10000: 
+            conn.close()
+            config = get_sys_config()
+            if config.get('api_key'):
+                from scheduler import sync_tmdb_data
+                import asyncio
+                add_log("INFO", f"🚀 首次访问触发：基础库不足，后台静默开启 500 页历史数据大补全...")
+                asyncio.create_task(sync_tmdb_data(force=True, mode="base"))
+            conn = get_db()
 
     offset = (page - 1) * size
     sub_dict = {row['tmdb_id']: row['status'] for row in conn.execute("SELECT tmdb_id, status FROM subscriptions").fetchall()}
@@ -214,23 +223,50 @@ async def api_drive_action(req: DriveActionReq):
         return {"code": 200 if success else 500, "msg": msg}
     except Exception as e: return {"code": 500, "msg": str(e)}
 
+# ==================== 【核心修复】115 扫码登录接口伪装与容错 ====================
+HEADERS_115 = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*"
+}
+
 @router.get("/api/115/qrcode")
 async def get_115_qr():
-    async with httpx.AsyncClient() as client: return (await client.get("https://qrcodeapi.115.com/api/1.0/web/1.0/token/")).json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client: 
+            res = await client.get("https://qrcodeapi.115.com/api/1.0/web/1.0/token/", headers=HEADERS_115)
+            # 防止 115 依然拦截返回非 JSON，主动抛出异常被我们捕获
+            res.raise_for_status() 
+            return res.json()
+    except Exception as e:
+        add_log("ERROR", f"获取 115 二维码失败: {str(e)}")
+        # 抛出标准的 HTTP 错误给前端，这样前端就不会“毫无反应”，而是能弹窗提示
+        raise HTTPException(status_code=500, detail=f"网络请求或 115 接口拦截: {str(e)}")
 
 @router.post("/api/115/status")
 async def get_115_st(p: QrcodeStatusModel):
-    async with httpx.AsyncClient() as client: return (await client.get(f"https://qrcodeapi.115.com/get/status/?uid={p.uid}&time={p.time}&sign={p.sign}")).json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client: 
+            res = await client.get(f"https://qrcodeapi.115.com/get/status/?uid={p.uid}&time={p.time}&sign={p.sign}", headers=HEADERS_115)
+            return res.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/115/login")
 async def log_115(p: QrcodeLoginModel):
-    async with httpx.AsyncClient() as client:
-        res = (await client.post("https://passportapi.115.com/app/1.0/web/1.0/login/qrcode/", data={"app": "web", "account": p.uid})).json()
-        if res.get('state'):
-            ck = "; ".join(f"{k}={v}" for k, v in res['data']['cookie'].items())
-            conn = get_db(); conn.execute("REPLACE INTO system_configs (config_key, config_value) VALUES ('cookie_115', ?)", (ck,)); conn.commit(); conn.close()
-            return {"message": "成功"}
-    raise HTTPException(400, "失败")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.post("https://passportapi.115.com/app/1.0/web/1.0/login/qrcode/", data={"app": "web", "account": p.uid}, headers=HEADERS_115)
+            res_json = res.json()
+            if res_json.get('state'):
+                ck = "; ".join(f"{k}={v}" for k, v in res_json['data']['cookie'].items())
+                conn = get_db()
+                conn.execute("REPLACE INTO system_configs (config_key, config_value) VALUES ('cookie_115', ?)", (ck,))
+                conn.commit()
+                conn.close()
+                return {"message": "成功"}
+            raise HTTPException(status_code=400, detail="登录失败或二维码已过期")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/logs")
 def fetch_logs(): return get_logs(100)
